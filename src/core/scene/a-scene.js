@@ -44,6 +44,7 @@ class AScene extends AEntity {
     self.isIOS = isIOS;
     self.isMobile = isMobile;
     self.hasWebXR = isWebXRAvailable;
+
     self.isAR = false;
     self.isScene = true;
     self.object3D = new THREE.Scene();
@@ -61,6 +62,9 @@ class AScene extends AEntity {
     self.hasLoaded = false;
     self.isPlaying = false;
     self.originalHTML = self.innerHTML;
+
+    self.supportRoomMesh = true;
+    self.roomMeshes = new Map();
   }
 
   addFullScreenStyles () {
@@ -751,6 +755,105 @@ class AScene extends AEntity {
       // restore it again after rendering.
       savedBackground = this.object3D.background;
       this.object3D.background = null;
+      // Check the Meshes if support is enabled
+      if (this.supportRoomMesh) {
+        var referenceSpace = this.renderer.xr.getReferenceSpace();
+        frame.detectedMeshes.forEach((mesh) => {
+          const meshPose = frame.getPose(mesh.meshSpace, referenceSpace);
+          let meshMesh;
+          let wireframeMesh;
+          if (this.roomMeshes.has(mesh)) {
+            // may have been updated:
+            const meshContext = this.roomMeshes.get(mesh);
+            meshMesh = meshContext.mesh;
+            wireframeMesh = meshContext.wireframe;
+
+            if (meshContext.timestamp < mesh.lastChangedTime) {
+              // the mesh was updated!
+              meshContext.timestamp = mesh.lastChangedTime;
+
+              // TODO: As aframe component
+              const geometry = createGeometry(mesh.vertices, mesh.indices);
+              meshContext.mesh.geometry.dispose();
+              meshContext.mesh.geometry = geometry;
+              meshContext.wireframe.geometry.dispose();
+              meshContext.wireframe.geometry = geometry;
+            }
+          } else {
+            // Create geometry:
+            const geometry = createGeometry(mesh.vertices, mesh.indices);
+            geometry.computeBoundingBox();
+
+            const x = geometry.boundingBox.max.x - geometry.boundingBox.min.x;
+            const y = geometry.boundingBox.max.y - geometry.boundingBox.min.y;
+            const z = geometry.boundingBox.max.z - geometry.boundingBox.min.z;
+            const geometryBoundingBox = new THREE.BoxGeometry(x, y, z);
+
+            wireframeMesh = new THREE.Mesh(geometry, wireframeMaterial);
+            wireframeMesh.matrixAutoUpdate = false;
+            wireframeMesh.matrix.fromArray(meshPose.transform.matrix);
+            // scene.add(wireframeMesh);
+            // physics.addMesh(wireframeMesh);
+
+            meshMesh = new THREE.Mesh(
+              geometry,
+              meshMaterials[meshId % meshMaterials.length]
+            );
+            meshMesh.matrix.fromArray(meshPose.transform.matrix);
+
+            meshMesh.matrixAutoUpdate = false;
+            // scene.add(meshMesh);
+
+            const originGroup = baseOriginGroup.clone();
+            originGroup.visible = false;
+
+            meshMesh.add(originGroup);
+            allMeshOrigins.push(originGroup);
+
+            const meshContext = {
+              id: meshId,
+              timestamp: mesh.lastChangedTime,
+              mesh: meshMesh,
+              wireframe: wireframeMesh,
+              origin: originGroup
+            };
+
+            // let pos = meshMesh.geometry.getAttribute("position");
+            let pos = new THREE.Vector3();
+            pos.x = meshMesh.geometry.attributes.position.array[0];
+            pos.y = meshMesh.geometry.attributes.position.array[1];
+            pos.z = meshMesh.geometry.attributes.position.array[2];
+
+            // Update the matrix before sending to the server
+            meshMesh.matrix.fromArray(meshPose.transform.matrix);
+
+            const indices = new Uint32Array(mesh.indices);
+
+            let meshDataForPhysics = {
+              bbox: geometry.boundingBox,
+              vertices: mesh.vertices,
+              indices: mesh.indices,
+              geometry: geometry,
+              matrix: meshMesh.matrix
+            };
+
+            this.roomMeshes.set(mesh, meshContext);
+            console.debug('New mesh detected, id=' + meshId);
+            meshId++;
+          }
+
+          if (meshPose) {
+            meshMesh.visible = true;
+            meshMesh.matrix.fromArray(meshPose.transform.matrix);
+            wireframeMesh.visible = true;
+            wireframeMesh.matrix.fromArray(meshPose.transform.matrix);
+          } else {
+            meshMesh.visible = false;
+            wireframeMesh.visible = false;
+          }
+        }); // end detechMeshes
+        console.log(referenceSpace);
+      }
     }
     renderer.render(this.object3D, this.camera);
     if (savedBackground) {
@@ -899,6 +1002,25 @@ function setupCanvas (sceneEl) {
     document.body.focus();
   }
 }
+
+function createGeometry (vertices, indices) {
+  const geometry = new THREE.BufferGeometry();
+  geometry.setIndex(new THREE.BufferAttribute(indices, 1));
+  geometry.setAttribute('position', new THREE.BufferAttribute(vertices, 3));
+  geometry.computeVertexNormals();
+  return geometry;
+}
+
+const wireframeMaterial = new THREE.MeshBasicMaterial({
+  wireframe: true
+});
+
+const allMeshOrigins = [];
+const meshMaterials = [];
+
+let meshId = 1;
+
+const baseOriginGroup = new THREE.Group();
 
 module.exports.setupCanvas = setupCanvas;
 module.exports.AScene = AScene;
